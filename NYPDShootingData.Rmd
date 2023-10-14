@@ -1,0 +1,224 @@
+---
+title: "NYPD Shooting Data Project"
+author: "Carsen Schulz"
+date: "2023-09-27"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+#knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+```
+
+## Summary of Data
+This data is the historical data of NYPD shootings, from 2006 to 2022. It is organized such that each row is an instance of a shooting, while each column gives information about that shooting. Some important attributes included in the data are:
+
+* Occurrence Date
+* Occurrence Time
+* Borough
+* Precinct
+* Statistical Murder Flag (whether the shooting was classified as a murder)
+* Perpetrator Characteristics
+* Victim Characteristics
+
+
+
+```{r importData, echo=TRUE}
+url <- "https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD"
+NYPD_data <- read_csv(url)
+```
+
+## Tidy the Data
+
+I did two things to tidy the data:
+
+1. Changed the data type of the date column to a date type instead of a character type.
+
+2. Removed unnecessary columns such as location descriptions (I show that over 90% were N/A), GPS location data, info about borough and precinct, and perpetrator/victim information. 
+
+This data is not useless - there are interesting analyses to be done with it. I simply chose not to use that data for this project.
+
+In a broader scope project, I would love to investigate the geospatial relationships between boroughs, for example.
+
+```{r tidyData, echo=TRUE}
+NYPD_data <- NYPD_data %>%
+  mutate(OCCUR_DATE = mdy(OCCUR_DATE))
+
+sum(is.na(NYPD_data$LOC_OF_OCCUR_DESC)) / nrow(NYPD_data)
+sum(is.na(NYPD_data$LOC_CLASSFCTN_DESC)) / nrow(NYPD_data)
+
+NYPD_data <- NYPD_data %>% select(-LOC_OF_OCCUR_DESC, -LOC_CLASSFCTN_DESC, -JURISDICTION_CODE,
+                                  -X_COORD_CD, -Y_COORD_CD, -Latitude, -Longitude, -Lon_Lat,
+                                  -PERP_AGE_GROUP, -PERP_SEX, -PERP_RACE, -VIC_AGE_GROUP,
+                                  -VIC_SEX, -VIC_RACE, -LOCATION_DESC)
+
+summary(NYPD_data)
+```
+
+## Year-by-Year Analysis
+
+I am curious whether the number of shootings in New York has gone up or down since 2006. To analyze this, I will make a bar graph of the number of shootings each year. This will require making a new column for "YEAR".
+
+Additionally, in the same bar graph, I want to see how many of those shootings were classified as murders.
+
+The grey bar shown is the number of shootings in that year, and the black portion of the bar represents how many of those shootings were classified as a murder:
+
+```{r yearly_shootings}
+# Create a tibble with the year, count of shootings, and count of murders
+yearly_summary <- NYPD_data %>%
+  mutate(Year = format(as.Date(OCCUR_DATE), "%Y")) %>%
+  group_by(Year) %>%
+  summarise(ShootingCount = n(), MurderCount = sum(STATISTICAL_MURDER_FLAG))
+
+# Create a bar chart with both total shootings and murders
+ggplot(yearly_summary, aes(x = Year)) +
+  geom_bar(aes(y = ShootingCount, fill = "Total Shootings"), stat = "identity", position = "identity") +
+  geom_bar(aes(y = MurderCount, fill = "Murders"), stat = "identity", position = "identity") +
+  labs(title = "NYPD Shootings/Murders Per Year", x = "Year", y = "Total Count") +
+  scale_fill_manual(values = c("Total Shootings" = "grey", "Murders" = "black")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + #Rotate the x-axis labels
+  labs(fill = "Legend")  # Change the legend title
+```
+
+The comparison of shootings to murders is not particularly interesting. It appears that murders are always a relatively stable fraction of shootings (it appears somewhere between 15-25% of shootings are classified as murders every year.) There is no instance in which one year had a high number of shootings but a low comparative classification of murders, or vice versa.
+
+There are two things I found particularly interesting about this graph:
+
+* 2017, 2018, and 2019 are all very low relative to the surrounding years - why?
+  + They are also very near the same year-over-year without much variation which seems odd.
+  
+* 2020 and 2021 are among the highest years, with 2020 approximately doubling 2019 - but this was the time of COVID-19 lockdowns.
+  + Does this mean that the lockdowns had no influence on gun violence?
+  
+In a broader scope report, I would investigate these findings further.
+
+## Murder Model
+
+For my model, I chose to do a simple logistic regression to predict the likelihood of the next shooting incident resulting in a murder based on whether the previous incident was a murder or not. It considers the binary outcome of "murder" or "no murder" and uses the lag information from the previous incident to make the prediction.
+
+This model is very simplified and is not optimized at all, but it gives a rough walkthrough of this type of prediction:
+
+``` {r murder_model}
+# Preprocess the data
+NYPD_data <- NYPD_data %>%
+  mutate(Murder = as.numeric(STATISTICAL_MURDER_FLAG))  # Convert "STATISTICAL_MURDER_FLAG" to numeric
+
+# Create a time series lag feature
+NYPD_data <- NYPD_data %>%
+  arrange(OCCUR_DATE) %>%
+  mutate(Lag_Murder = lag(Murder))
+
+# Filter out the first incident in each group (no previous incident)
+NYPD_data <- NYPD_data %>% filter(!is.na(Lag_Murder))
+
+# Build a logistic regression model
+model <- glm(Murder ~ Lag_Murder, data = NYPD_data, family = "binomial")
+
+# Make predictions for the next shooting
+new_data <- data.frame(Lag_Murder = 1)  # Assuming 1 indicates a shooting in the last incident
+prediction <- predict(model, newdata = new_data, type = "response")
+
+# Display the prediction
+cat("Predicted Probability of Murder in the Next Shooting:", prediction, "\n")
+```
+
+One way I could optimize this while keeping it fairly simple is by grouping incidents by precinct and borough, so that the model could more accurately predict a murder based on location. This could affect the probability if a certain precinct/borough has a lower murder rate/shooting than another.
+
+## Daytime vs. Nighttime Analysis
+
+The next analysis I want to do will require a new column of data, called DAYTIME, which is a boolean value.
+
+DAYTIME is true if the OCCUR_TIME is between 7AM and 7PM (during the day), and FALSE otherwise (at night).
+
+The pie chart shows the distribution between shootings during the day vs. at night.
+
+This confirms my prediction that more shootings happen at night than during the day.
+
+```{r daytime_analysis_vis}
+# Create the DAYTIME column
+NYPD_data <- NYPD_data %>%
+mutate(DAYTIME = as.POSIXlt(OCCUR_TIME, format = "%H:%M:%S")$hour >= 7 &
+as.POSIXlt(OCCUR_TIME, format = "%H:%M:%S")$hour < 19)
+
+# Create summary table to count the occurrences of each DAYTIME value
+daytime_summary <- NYPD_data %>%
+  group_by(DAYTIME) %>%
+  summarise(count = n())
+
+# Create pie chart
+ggplot(daytime_summary, aes(x = "", y = count, fill = DAYTIME)) +
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar(theta = "y") +
+  scale_fill_manual(values = c("TRUE" = "yellow", "FALSE" = "black"), 
+                    labels = c("TRUE" = "During the Day", "FALSE" = "At Night")) +
+  theme_void() +
+  labs(title = "Distribution of Shooting Incidents based on time of day", fill = "Legend")
+```
+
+This made me curious about which hour is the highest, and which is the lowest, so I made a new column for "HOUR".
+
+## Hourly Analysis
+
+I created an hourly summary tibble that counts the number of shootings per each hour of the day.
+
+I then visualized this tibble in a bar chart. It clearly agrees with the pie chart above, as more shootings occur in the nighttime hours.
+
+I confirm that by calculating the min and max of the tibble, and printing that to screen.
+
+```{r hourly_analysis_vis}
+# Extract the hour component from OCCUR_TIME
+NYPD_data$HOUR <- as.POSIXlt(NYPD_data$OCCUR_TIME, format = "%H:%M:%S")$hour
+
+# Create summary table to count the number of incidents for each hour
+hourly_summary <- NYPD_data %>%
+  group_by(HOUR) %>%
+  summarise(count = n())
+
+# Create bar chart
+ggplot(hourly_summary, aes(x = HOUR, y = count)) +
+  geom_bar(stat = "identity", fill = "blue") +
+  labs(title = "Number of Shooting Incidents by Hour of the Day", x = "Hour of the Day", y = "Number of Incidents") +
+  scale_x_continuous(breaks = 0:23)  # Ensure x-axis shows all hours from 0 to 23
+
+# Find the hour with the highest number of shootings (maximum count)
+max_hour_count <- hourly_summary %>%
+  filter(count == max(count)) %>%
+  pull(HOUR)
+
+# Find the hour with the lowest number of shootings (minimum count)
+min_hour_count <- hourly_summary %>%
+  filter(count == min(count)) %>%
+  pull(HOUR)
+
+# Print the results
+cat("Hour with the highest number of shootings:", max_hour_count, "with", max(hourly_summary$count), "shootings\n")
+cat("Hour with the lowest number of shootings:", min_hour_count, "with", min(hourly_summary$count), "shootings\n")
+```
+
+As you can see, the highest number of shootings occurred between 11PM and 12PM, while the lowest number occurred between 9AM and 10AM.
+
+## Bias of Data and Analysis
+
+### Possible Biases
+
+No dataset is perfect, because it reflects an imperfect reality. This dataset, for instance, has many possible biases:
+
+1. Selection Bias: There is no way of knowing that this data represents every shooting in New York, because shootings that went unreported are missing.
+
+2. Sampling Bias in Location: Different boroughs or precincts may have different criteria on recording these shootings, and some areas may be more or less likely to report incidents than others.
+
+3. Missing Data Bias: Approximately 1/3 of the perpetrator data is N/A, as well as over 90% of the location description data. This missing data leads to bias because it is not a perfect representation of reality.
+
+4. Reporting Bias: It is possible that shootings that happen at night might be less likely to be reported, which would lead to bias.
+
+### Mitigations for Data Bias
+
+There is no way to mitigate the first bias, but I trust that this data source is appropriately representative of the reality. For the 2nd and 3rd biases, I purposely did not do any analysis based on location or perpetrator description because so much of it was missing.
+
+I think the 4th bias mentioned mitigates itself, because even with the possible lower likelihood of a nighttime shooting being reported, the amount of nighttime shootings in the data was still significantly more than daytime. These missing reports would have only separated the distribution further.
+
+
+
+
